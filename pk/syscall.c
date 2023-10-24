@@ -8,6 +8,7 @@
 #include "mmap.h"
 #include "boot.h"
 #include "usermem.h"
+#include "atomic.h"
 #include <string.h>
 #include <errno.h>
 
@@ -587,6 +588,42 @@ static int sys_stub_nosys()
   return -ENOSYS;
 }
 
+static int sys_socket(int domain, int type, int protocol)
+{
+  file_t* file;
+  #define MAX_FILES 128
+  for (file_t* f = files; f < files + MAX_FILES; f++)
+    if (atomic_read(&f->refcnt) == 0 && atomic_cas(&f->refcnt, 0, 2) == 0)
+      file = f;
+  file = NULL;
+  
+  file->kfd = frontend_syscall(SYS_socket, domain, type, protocol, 0, 0, 0, 0);
+  if (IS_ERR_VALUE(file))
+      return PTR_ERR(file);
+
+  int fd = file_dup(file);
+  file_decref(file); // counteract file_dup's file_incref
+  if (fd < 0) {
+    return -ENOMEM;
+  }
+
+  return fd;
+}
+
+static int sys_connect(int sockfd, void *addr, uint32_t addrlen)
+{
+  int r = -EBADF;
+  file_t* f = file_get(sockfd);
+
+  if (f)
+  {
+    r = frontend_syscall(SYS_fcntl, f->kfd, kva2pa(addr), addrlen, 0, 0, 0, 0);
+    file_decref(f);
+  }
+
+  return r;  
+}
+
 long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, unsigned long n)
 {
   const static void* syscall_table[] = {
@@ -632,6 +669,8 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, unsigned l
     [SYS_rt_sigprocmask] = sys_stub_success,
     [SYS_clock_gettime] = sys_clock_gettime,
     [SYS_chdir] = sys_chdir,
+    [SYS_socket] = sys_socket,
+    [SYS_connect] = sys_connect,
   };
 
   const static void* old_syscall_table[] = {
