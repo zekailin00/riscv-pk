@@ -590,16 +590,21 @@ static int sys_stub_nosys()
 
 static int sys_socket(int domain, int type, int protocol)
 {
-  file_t* file;
+  file_t* file = NULL;
   #define MAX_FILES 128
   for (file_t* f = files; f < files + MAX_FILES; f++)
     if (atomic_read(&f->refcnt) == 0 && atomic_cas(&f->refcnt, 0, 2) == 0)
       file = f;
-  file = NULL;
-  
-  file->kfd = frontend_syscall(SYS_socket, domain, type, protocol, 0, 0, 0, 0);
-  if (IS_ERR_VALUE(file))
-      return PTR_ERR(file);
+  if (file == NULL)
+    return -ENOMEM;
+ 
+  long ret = frontend_syscall(SYS_socket, domain, type, protocol, 0, 0, 0, 0);
+  if (ret >= 0) {
+    file->kfd = ret;
+  } else {
+    file_decref(file);
+    return PTR_ERR(file);
+  }
 
   int fd = file_dup(file);
   file_decref(file); // counteract file_dup's file_incref
@@ -617,7 +622,10 @@ static int sys_connect(int sockfd, void *addr, uint32_t addrlen)
 
   if (f)
   {
-    r = frontend_syscall(SYS_fcntl, f->kfd, kva2pa(addr), addrlen, 0, 0, 0, 0);
+    char addr_buf[addrlen];
+    memcpy_from_user(addr_buf, addr, addrlen);
+
+    r = frontend_syscall(SYS_connect, f->kfd, kva2pa(addr_buf), addrlen, 0, 0, 0, 0);
     file_decref(f);
   }
 
