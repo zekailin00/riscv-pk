@@ -615,6 +615,75 @@ static int sys_socket(int domain, int type, int protocol)
   return fd;
 }
 
+static int sys_bind(int sockfd, void *addr, uint32_t addrlen)
+{
+  int r = -EBADF;
+  file_t* f = file_get(sockfd);
+
+  if (f)
+  {
+    char addr_buf[addrlen];
+    memcpy_from_user(addr_buf, addr, addrlen);
+
+    r = frontend_syscall(SYS_bind, f->kfd, kva2pa(addr_buf), addrlen, 0, 0, 0, 0);
+    file_decref(f);
+  }
+
+  return r;
+}
+
+static int sys_listen(int sockfd, int backlog)
+{
+  int r = -EBADF;
+  file_t* f = file_get(sockfd);
+
+  if (f)
+  {
+    r = frontend_syscall(SYS_bind, f->kfd, backlog, 0, 0, 0, 0, 0);
+    file_decref(f);
+  }
+
+  return r;
+}
+
+static int sys_accept(int sockfd, void *addr, void *addrlen)
+{
+  int r = -EBADF;
+  file_t* f = file_get(sockfd);
+
+  if (f == NULL) {
+    return r;
+  }
+  
+  file_t* file = NULL;
+  for (file_t* ff = files; ff < files + MAX_FILES; ff++)
+    if (atomic_read(&ff->refcnt) == 0 && atomic_cas(&ff->refcnt, 0, 2) == 0)
+      file = ff;
+  if (file == NULL)
+    return -ENOMEM;
+ 
+  if (addr == NULL) {
+    r = frontend_syscall(SYS_accept, f->kfd, 0, 0, 0, 0, 0, 0);
+  } else {
+    return -ENOSYS; // not implemented
+  }
+
+  if (r >= 0) {
+    file->kfd = r;
+  } else {
+    file_decref(file);
+    return PTR_ERR(file);
+  }
+
+  int fd = file_dup(file);
+  file_decref(file);
+  if (fd < 0) {
+    return -ENOMEM;
+  }
+
+  return fd;
+}
+
 static int sys_connect(int sockfd, void *addr, uint32_t addrlen)
 {
   int r = -EBADF;
@@ -629,7 +698,66 @@ static int sys_connect(int sockfd, void *addr, uint32_t addrlen)
     file_decref(f);
   }
 
-  return r;  
+  return r;
+}
+
+static int sys_send(int sockfd, char *buf, uint32_t len, int flags)
+{
+  ssize_t r = -EBADF;
+  file_t* f = file_get(sockfd);
+  char kbuf[MAX_BUF];
+
+  if (f) {
+    for (size_t total = 0; ; ) {
+      size_t cur = MIN(len - total, MAX_BUF);
+      memcpy_from_user(kbuf, buf, cur);
+
+      r = frontend_syscall(SYS_sendto, f->kfd, kva2pa(kbuf), cur, flags, 0, 0, 0);
+
+      if (r < 0)
+        break;
+
+      total += r;
+      buf += r;
+      if (r < cur || total == len) {
+        r = total;
+        break;
+      }
+    }
+
+    file_decref(f);
+  }
+
+  return r;
+}
+
+static int sys_recv(int sockfd, char *buf, uint32_t len, int flags)
+{
+  ssize_t r = -EBADF;
+  file_t* f = file_get(sockfd);
+  char kbuf[MAX_BUF];
+
+  if (f) {
+    for (size_t total = 0; ; ) {
+      size_t cur = MIN(len - total, MAX_BUF);
+      r = frontend_syscall(SYS_recvfrom, f->kfd, kva2pa(kbuf), cur, flags, 0, 0, 0);
+      if (r < 0)
+        break;
+
+      memcpy_to_user(buf, kbuf, r);
+
+      total += r;
+      buf += r;
+      if (r < cur || total == len) {
+        r = total;
+        break;
+      }
+    }
+
+    file_decref(f);
+  }
+
+  return r;
 }
 
 long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, unsigned long n)
@@ -678,7 +806,12 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, unsigned l
     [SYS_clock_gettime] = sys_clock_gettime,
     [SYS_chdir] = sys_chdir,
     [SYS_socket] = sys_socket,
+    [SYS_bind] = sys_bind,
+    [SYS_listen] = sys_listen,
+    [SYS_accept] = sys_accept,
     [SYS_connect] = sys_connect,
+    [SYS_sendto] = sys_send,
+    [SYS_recvfrom] = sys_recv,
   };
 
   const static void* old_syscall_table[] = {
