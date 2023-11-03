@@ -593,8 +593,10 @@ static int sys_socket(int domain, int type, int protocol)
   file_t* file = NULL;
   #define MAX_FILES 128
   for (file_t* f = files; f < files + MAX_FILES; f++)
-    if (atomic_read(&f->refcnt) == 0 && atomic_cas(&f->refcnt, 0, 2) == 0)
+    if (atomic_read(&f->refcnt) == 0 && atomic_cas(&f->refcnt, 0, 2) == 0) {
       file = f;
+      break;
+    }
   if (file == NULL)
     return -ENOMEM;
  
@@ -639,7 +641,7 @@ static int sys_listen(int sockfd, int backlog)
 
   if (f)
   {
-    r = frontend_syscall(SYS_bind, f->kfd, backlog, 0, 0, 0, 0, 0);
+    r = frontend_syscall(SYS_listen, f->kfd, backlog, 0, 0, 0, 0, 0);
     file_decref(f);
   }
 
@@ -656,9 +658,11 @@ static int sys_accept(int sockfd, void *addr, void *addrlen)
   }
   
   file_t* file = NULL;
-  for (file_t* ff = files; ff < files + MAX_FILES; ff++)
-    if (atomic_read(&ff->refcnt) == 0 && atomic_cas(&ff->refcnt, 0, 2) == 0)
+  for (file_t* ff = files; ff < files + 128; ff++)
+    if (atomic_read(&ff->refcnt) == 0 && atomic_cas(&ff->refcnt, 0, 2) == 0) {
       file = ff;
+      break;
+    }
   if (file == NULL)
     return -ENOMEM;
  
